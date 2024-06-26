@@ -1,0 +1,110 @@
+version: "3.8"
+
+services:
+  spark-iceberg:
+    image: tabulario/spark-iceberg:latest
+    container_name: spark-iceberg
+    build: spark/
+    networks:
+      - iceberg_net
+    depends_on:
+      rest:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    volumes:
+      - ./warehouse:/home/tony/miniproject/warehouse
+      - ./notebooks:/home/tony/miniproject/notebooks
+    environment:
+      - PYSPARK_PYTHON=/usr/bin/python3
+      - SPARK_HOME=/opt/spark
+      - AWS_ACCESS_KEY_ID=admin
+      - AWS_SECRET_ACCESS_KEY=password
+      - AWS_REGION=us-east-1
+      - spark.jars.packages=org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.5.2
+      - spark.sql.extensions=org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions
+      - spark.sql.catalog.spark_catalog=org.apache.iceberg.spark.SparkSessionCatalog
+      - spark.sql.catalog.spark_catalog.type=hive
+      - spark.sql.catalog.local=org.apache.iceberg.spark.SparkCatalog
+      - spark.sql.catalog.local.type=hadoop
+      - spark.sql.catalog.local.warehouse=/home/iceberg/warehouse
+      - spark.sql.defaultCatalog=local
+    ports:
+      - 8888:8888
+      - 8082:8080
+      - 10000:10000
+      - 10001:10001
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8080 || exit 1"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+      start_period: 60s
+
+  rest:
+    image: tabulario/iceberg-rest:latest
+    container_name: iceberg-rest
+    networks:
+      - iceberg_net
+    ports:
+      - 8181:8181
+    environment:
+      - AWS_ACCESS_KEY_ID=admin
+      - AWS_SECRET_ACCESS_KEY=password
+      - AWS_REGION=us-east-1
+      - CATALOG_WAREHOUSE=s3://warehouse/
+      - CATALOG_IO__IMPL=org.apache.iceberg.aws.s3.S3FileIO
+      - CATALOG_S3_ENDPOINT=http://minio:9000
+    depends_on:
+      minio:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8181/ || exit 1"]
+      interval: 30s
+      timeout: 20s
+      retries: 10
+      start_period: 120s
+
+  minio:
+    image: minio/minio:latest
+    container_name: minio
+    environment:
+      - MINIO_ROOT_USER=admin
+      - MINIO_ROOT_PASSWORD=password
+      - MINIO_DOMAIN=minio
+    networks:
+      iceberg_net:
+        aliases:
+          - warehouse.minio
+    ports:
+      - 9001:9001
+      - 9000:9000
+    command: ["server", "/data", "--console-address", ":9001"]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:9000/minio/health/live || exit 1"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+      start_period: 60s
+
+  mc:
+    depends_on:
+      - minio
+    image: minio/mc:latest
+    container_name: mc
+    networks:
+      - iceberg_net
+    environment:
+      - AWS_ACCESS_KEY_ID=admin
+      - AWS_SECRET_ACCESS_KEY=password
+      - AWS_REGION=us-east-1
+    entrypoint: >
+      /bin/sh -c "
+      until (/usr/bin/mc config host add minio http://minio:9000 admin password) do echo '...waiting...' && sleep 1; done;
+      /usr/bin/mc mb --ignore-existing minio/warehouse;
+      /usr/bin/mc policy set public minio/warehouse;
+      tail -f /dev/null
+      "
+
+networks:
+  iceberg_net:
